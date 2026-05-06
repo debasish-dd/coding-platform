@@ -3,6 +3,7 @@ import {
   pollBatchResults,
   submitBatchToJudge0,
 } from "../libs/judge0.js";
+import { db } from "../libs/db.js";
 
 export const createProblem = async (req, res) => {
   try {
@@ -19,70 +20,90 @@ export const createProblem = async (req, res) => {
     } = req.body;
 
     if (!title || !description || !difficulty) {
-      return res
-        .status(400)
-        .json({ message: "Title, description, and difficulty are required" });
+      return res.status(400).json({ message: "Missing required fields" });
     }
 
-    for (const [language, solutionCode] of Object.entries(referenceSolution)) {
-      const languageID = getJudge0LanguageID(language);
-      if (!languageID) {
-        return res
-          .status(400)
-          .json({ message: `Unsupported language: ${language}` });
-      }
+    if (!Array.isArray(testCases) || testCases.length === 0) {
+      return res.status(400).json({ message: "Test cases are required" });
+    }
 
-      const submission = testCases.map(({ input, output }) => {
-        return {
-          language_id: languageID,
-          source_code: solutionCode,
-          stdin: input,
-          expected_output: output,
-        };
-      });
+    if (!referenceSolution || typeof referenceSolution !== "object") {
+      return res.status(400).json({ message: "Reference solution required" });
+    }
 
-      const submisstionResult = await submitBatchToJudge0(submission);
+    const controller = new AbortController();
+    let firstError = null;
 
-      const token = submisstionResult.map((result) => result.token);
-      console.log("token -> ", token);
+    await Promise.all(
+      Object.entries(referenceSolution).map(
+        async ([language, solutionCode]) => {
+          if (controller.signal.aborted) return;
+          try {
+            const languageID = getJudge0LanguageID(language);
+            if (!languageID) {
+              throw new Error(`Unsupported language: ${language}`);
+            }
 
-      const results = await pollBatchResults(token);
+            const submission = testCases.map(({ input, output }) => ({
+              language_id: languageID,
+              source_code: solutionCode,
+              stdin: input.trim() + "\n",
+              expected_output: output.trim() + "\n",
+            }));
 
-      //    console.log("results -> ", results);
+            const submissionResult = await submitBatchToJudge0(submission);
 
-      for (let i = 0; i < results.length; i++) {
-        const result = results[i];
-        if (result.status.id !== 3) {
-          return res
-            .status(400)
-            .json({
-              message: `Reference solution failed for language: ${language} on test case ${i + 1}`,
+            if (!submissionResult) {
+              throw new Error("Judge0 submission failed");
+            }
+
+            const tokens = submissionResult.map((r) => r.token);
+            const results = await pollBatchResults(tokens);
+
+            results.forEach((result, i) => {
+              if (result.status.id !== 3) {
+                throw new Error(`Failed for ${language} on test case ${i + 1}`);
+              }
             });
-        }
-      }
+          } catch (err) {
+            if (!firstError) {
+              firstError = err;
+              controller.abort();
+            }
+          }
+        },
+      ),
+    );
 
-      const newProblem = {
-        title,
-        description,
-        difficulty,
-        tags,
-        examples,
-        constraints,
-        testCases,
-        codeSnippets,
-        referenceSolution,
-      };
+    if (firstError) throw firstError;
 
-      await db.problems.create(newProblem);
+    const newProblem = await db.problem.create({
+  data: {
+    title,
+    description,
+    difficulty,
+    tags,
+    examples,
+    constraints,
+    testCases,
+    codeSnippets,
+    referenceSolution,
+    userId: req.user.id,
+  },
+});
 
-      res
-        .status(201)
-        .json({ message: "Problem created successfully", problem: newProblem });
-    }
+    return res.status(201).json({
+      message: "Problem created successfully",
+      problem: newProblem,
+    });
   } catch (error) {
-    console.error("Error creating problem:", error);
-    res
-      .status(500)
-      .json({ message: "Internal server error while creating problem" });
+    console.error(error);
+    return res.status(500).json({
+      message: error.message || "Internal server error",
+    });
   }
+};
+
+export const check = async (req, res) => {
+  return res.status(200).json({ message: "Check endpoint is working" });
 };

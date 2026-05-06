@@ -50,5 +50,5 @@ export const isAdmin = async (req, res, next) => {
       message: "Internal server error while checking admin privileges",
     });
   }
-
+  next();
 }
